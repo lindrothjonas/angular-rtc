@@ -1,0 +1,30 @@
+<content>
+  <mat-list *ngFor="let i of ['Today']">
+    <mat-list-item class="category-title">
+      {{i}}
+    </mat-list-item>
+    <mat-list-item style="height:auto;" *ngFor="let hist of history">
+      <app-message style="width:100%;"
+        [avatar]="a"
+        [destination]="hist.destination"
+        [outgoing]="hist.outgoing"
+        [recieved]="hist.timestamp"
+        [id]="hist.id"
+        (call)="onCall($event)"
+        (removed)="onRemoved($event)"
+        (reply)="onNewMessage($event)">
+      </app-message>
+    </mat-list-item>
+  </mat-list>
+</content>
+<button
+  mat-fab
+  color="accent"
+  class="new-fab"
+  (click)="onNewCall(null, null)"
+  (mouseenter)="onMouseEnter(true)"
+  (mouseleave)="onMouseEnter(false)"
+  matTooltip="New Call"
+  matTooltipPosition="before">
+  <mat-icon>{{newCallIcon}}</mat-icon>
+</button>
