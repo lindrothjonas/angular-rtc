@@ -203,7 +203,12 @@ export class Call {
           this.callSubject.next("onlocalmedia") 
         }
       },
+      onConnectionChange: (call:any, state:any) => {
+        if (state == "failed")
+          this.hangup();
+      },
       onRemoteTrack: (call) => {  }
+      
     });
   }
   

@@ -10023,26 +10023,23 @@ function Call(sinch, videoSupport, callId) {
 		onCallEnded: function(call) {
 			var callDetails = call.getDetails();
 
-			if(callDetails.startedTime) { //Must have passed PROGRESSING for logging to occur, this is the time where the call is interesting not only input error
-				var reportObj = {
-					callId: call.callId,
-					domain: call.callDomain,
-					outbound: call.callOutbound, 
-					fromId: call.fromId,
-					toId: call.toId,
-					callTime: (new Date(callDetails.startedTime)).toISOString(),
-					duration: callDetails.duration, //Already in seconds
-					setupDuration: (call.timeEstablished - call.timeProgressing) / 1000.0 || 0,
-					result: call.callEndCause,
-					deviceInformation: {'ModelId': getPlatformInfo() || 'unknown', 'OSName': osName, 'OSVersion': osVersion, 'SDKPlatform': 'js', 'SDKPlatformVersion': sinch.getVersion()}
-					//connectionInfo: 'None', //TODO: Figure out what connection info is - Enl mail from ZORAN
-					//callStatistics: 'None' //TODO: Figure out what call statistics to attach (perhaps later?) - 
+			var reportObj = {
+				callId: call.callId,
+				domain: call.callDomain,
+				outbound: call.callOutbound, 
+				fromId: call.fromId,
+				toId: call.toId,
+				callTime: callDetails.startedTime ? (new Date(callDetails.startedTime)).toISOString() : new Date(),
+				duration: callDetails.duration, //Already in seconds
+				setupDuration: (call.timeEstablished - call.timeProgressing) / 1000.0 || 0,
+				result: call.callEndCause,
+				deviceInformation: {'ModelId': getPlatformInfo() || 'unknown', 'OSName': osName, 'OSVersion': osVersion, 'SDKPlatform': 'js', 'SDKPlatformVersion': sinch.getVersion()}
 				};
-				call.sinch.callReporting(reportObj).fail(function() {
-					console.error('Could not report call!');
-				});
-			}
-
+				
+			call.sinch.callReporting(reportObj).fail(function() {
+				console.error('Could not report call!');
+			});
+			
 			if(call.ffIceTimer) { //If call is ended early, ensure interval to add fake ice candidates are stopped (done mainly to not pollute logs)
 				clearInterval(call.ffIceTimer);
 			}
@@ -10428,16 +10425,24 @@ Call.prototype.mxpJoin = function(msgObj) {
 			return deferred.promise;
 		}.bind(this)).then(function() {
 			if(this.callState == CallState.PROGRESSING || this.earlymedia) {
-				this.activeInstance = msgObj.getSenderId();
-
-				this.sinch.mxp.callJoined(this).then(function() {
-					this.sinch.log(new Notification(0, 1, 'Successfully sent JOINED', this));
-					if(!this.earlymedia) { // When processing ack, early media will trigger establish. Don't double establish!
-						this.establish();
-					}
-				}.bind(this)).fail(function(error){
-					console.error('Unhandled error in call.mxpJoin.', error);
-				});
+				var peerConnection = this.getPeerConnectionInstance(msgObj.getSenderId());
+				if (peerConnection && peerConnection.hasRemoteDescription())
+				{
+					this.activeInstance = msgObj.getSenderId();
+					this.sinch.mxp.callJoined(this).then(function() {
+						this.sinch.log(new Notification(0, 1, 'Successfully sent JOINED', this));
+						if(!this.earlymedia) { // When processing ack, early media will trigger establish. Don't double establish!
+							this.establish();
+						}
+					}.bind(this)).fail(function(error){
+						console.error('Unhandled error in call.mxpJoin.', error);
+					});
+				}
+				else {
+					//Hangup call because we failed on setting remote description
+					this.sendCancel();
+				}
+				
 			}
 			else {
 				console.error('Can not process JOIN, call in unexpected state. Call state: ' + this.getState());
@@ -10449,6 +10454,7 @@ Call.prototype.mxpJoin = function(msgObj) {
 		});
 	}
 }
+
 
 /**
  * Internal: Trigger actions based on MXP JOIN message. Only used internally.
@@ -10802,7 +10808,7 @@ Call.prototype.getPlaceCallResponse = function(response) {
 			}
 
 			//Save media proxy fallback for later ICE candidate injection
-			this.relayUrl = response.body.replace(/(\r\n|\n|\r)/gm,"");
+			//this.relayUrl = response.body.replace(/(\r\n|\n|\r)/gm,"");
 			
 			this.sinch.mxp.configureMxpSession(this.callId, response.encryptionKey, response.body);
 			
@@ -11423,7 +11429,7 @@ CallClient.prototype.callUser = function (userId, headers, customStream) {
 	var call = new Call(this.sinch, this.sinch._supportVideo);
 	call.customHeaders = headers;
 
-	this.initStream(customStream).then(function(stream) {
+	this.initStream(customStream, true).then(function(stream) {
 		return this.sinch.mxp.subscribe('signalPubNub').then(function() {
 			if(call.callState == CallState.INITIATING) {
 				call.setStream(stream);
@@ -12870,48 +12876,50 @@ PeerConnectionInstance.prototype.addRemoteIceCandidate = function(candidate) {
 }
 
 PeerConnectionInstance.prototype.setRelayUrl = function(relayUrl) {
-    var host_port = relayUrl.split('/')[3].split(':');
-    this.relay = {
-        host : host_port[0],
-        port : host_port[1]
-    }
-    this.peerConnectionObserver.addRelayCandidates();
+	if (relayUrl == null)
+		return;
+	var host_port = relayUrl.split('/')[3].split(':');
+	this.relay = {
+			host : host_port[0],
+			port : host_port[1]
+	}
+	this.peerConnectionObserver.addRelayCandidates();
 }
 
 
 PeerConnectionInstance.prototype.internalSetRemoteDescription = function(sdp) {
-    var deferred = Q.defer();
-    this.remoteDescription = sdp;
-    Q.fcall(function() {
-        var deferred = Q.defer();
-        //if call is outbound localdescription is not set until remote description is received
-        //this way ice gathering doesn't start until bside acks reventing timeouts when using push
-        if (this.call.callOutbound) {
-            var offer = this.getLocalDescription(this.offer);
-            this.call.sinch.log(new Notification(2, 2, 'Set local description', {offer:this.offer, original:offer}));
-            this.peerConnection.setLocalDescription(offer, function() { 
-                deferred.resolve();
-            }, function(error) {
-                deferred.fail(error);
-            })
-        } else {
-            deferred.resolve();
-        }
-        return deferred.promise;
-    }.bind(this)).then(function() {
-        this.peerConnection.setRemoteDescription(sdp, function() {   
-            this.call.sinch.log(new Notification(2, 2, 'Remote description set', sdp));
-            this.addRemoteIceCandidates();
-            deferred.resolve();
-        }.bind(this), function(error) {
-            //NOTE: Don't cancel call if one recipient peer cause a failure, other's may answer properly. Instead we rely on "no-progress", timeout.
-            this.remoteDescription = null;
-            throw new SinchError(ErrorDomain.ErrorDomainSDK, ErrorCode.SDKInternalOther, 'Error setting remote SDP', error);
-        }.bind(this));
-    }.bind(this)).fail(function(error) {
-        throw new SinchError(ErrorDomain.ErrorDomainSDK, ErrorCode.SDKInternalOther, 'Error setting local SDP', error);
-    }.bind(this));
-	return deferred.promise;
+	var deferred = Q.defer();
+	Q.fcall(function() {
+			var deferred = Q.defer();
+			//if call is outbound localdescription is not set until remote description is received
+			//this way ice gathering doesn't start until bside acks reventing timeouts when using push
+			if (this.call.callOutbound) {
+					var offer = this.getLocalDescription(this.offer);
+					this.call.sinch.log(new Notification(2, 2, 'Set local description', {offer:this.offer, original:offer}));
+					this.peerConnection.setLocalDescription(offer, function() { 
+							deferred.resolve();
+					}, function(error) {
+							deferred.reject(error);
+					})
+			} else {
+					deferred.resolve();
+			}
+			return deferred.promise;
+	}.bind(this)).then(function() {
+			this.peerConnection.setRemoteDescription(sdp, function() {   
+					this.remoteDescription = sdp;
+					this.call.sinch.log(new Notification(2, 2, 'Remote description set', sdp));
+					this.addRemoteIceCandidates();
+					deferred.resolve();
+			}.bind(this), function(error) {
+					//NOTE: Don't cancel call if one recipient peer cause a failure, other's may answer properly. Instead we rely on "no-progress", timeout.
+					this.remoteDescription = null;
+					deferred.reject(new SinchError(ErrorDomain.ErrorDomainSDK, ErrorCode.SDKInternalOther, 'Error setting remote SDP', error));
+			}.bind(this));
+	}.bind(this)).fail(function(error) {
+			deferred.reject(new SinchError(ErrorDomain.ErrorDomainSDK, ErrorCode.SDKInternalOther, 'Error setting local SDP', error));
+	}.bind(this));
+return deferred.promise;
 }
 
 PeerConnectionInstance.prototype.setRemoteDescription = function(sdp) {
@@ -12972,8 +12980,8 @@ PeerConnectionObserver.prototype.sendIceCandidates = function() {
 
 PeerConnectionObserver.prototype.sendIceCandidate = function(iceCandidate) {
     //Only send ice candidates if destination has instances
-    if (this.call.instances == null)
-        return;
+    //if (this.call.instances == null)
+    //    return;
     if (this.instanceId == null) {
         //wait for ack before sending candidate
         this.call.sinch.log(new Notification(0, 2, 'Send candidate after answer is received', iceCandidate));
@@ -13037,7 +13045,7 @@ PeerConnectionObserver.prototype.onIceConnectionChanged = function(event) {
     this.call.sinch.log(new Notification(0, 1, 'WebRTC: Connection state changed: ' + event.currentTarget.iceConnectionState + ', instance: ' + this.instanceId, event));
     if(!this.call.renegotiate && event.currentTarget && (event.currentTarget.iceConnectionState == 'failed' || event.currentTarget.iceConnectionState == 'disconnected')) {
         this.call.sinch.log(new SinchError(ErrorDomain.ErrorDomainNetwork, ErrorCode.NetworkConnectionTimedOut, 'Ice connection failed. Hanging up call!', event));
-        //this.call.hangup();
+				this.call.execListener("onConnectionChange", event.currentTarget.iceConnectionState);
     }
 }
 

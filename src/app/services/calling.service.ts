@@ -20,7 +20,7 @@ export class CallingService {
   constructor(private sinchService:SinchService) { 
     this.media = MediaDevices.Create()
     this.events = new Subject<Call>()
-    this.media.getStream(true, true).subscribe((stream) => {
+    this.media.getStream(true, false).subscribe((stream) => {
       this.stream = stream
       this.stream.stop()
       sinchService.getEvents().subscribe((account) => {
